@@ -9,6 +9,9 @@
 
 
 #include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdint.h>
 
 /* some ansi prototypes.. maybe ought to make a .h file */
 
@@ -28,7 +31,7 @@ int parse_hex_line(char *theline, int bytes[], int *addr, int *num, int *code);
 void hexout(FILE *fhex, int byte, int memory_location, int end);
 
 
-extern int	memory[65536];		/* the memory is global */
+extern uint8_t	memory[0x20000];		/* the memory is global */
 
 /* parses a line of intel hex code, stores the data in bytes[] */
 /* and the beginning address in addr, and returns a 1 if the */
@@ -51,7 +54,7 @@ int *addr, *num, *code, bytes[];
 	if ( strlen(theline) < (11 + (len * 2)) ) return 0;
 	if (!sscanf(ptr, "%04x", addr)) return 0;
 	ptr += 4;
-	  /* printf("Line: length=%d Addr=%d\n", len, *addr); */
+	// printf("Line: length=%d Addr=%d\n", len, *addr);
 	if (!sscanf(ptr, "%02x", code)) return 0;
 	ptr += 2;
 	sum = (len & 255) + ((*addr >> 8) & 255) + (*addr & 255) + (*code & 255);
@@ -75,7 +78,7 @@ char *filename;
 {
 	char line[1000];
 	FILE *fin;
-	int addr, n, status, bytes[256];
+	int addr, n, status, bytes[256], addr_offset;
 	int i, total=0, lineno=1;
 	int minaddr=65536, maxaddr=0;
 
@@ -96,21 +99,37 @@ char *filename;
 		if (line[strlen(line)-1] == '\r') line[strlen(line)-1] = '\0';
 		if (parse_hex_line(line, bytes, &addr, &n, &status)) {
 			if (status == 0) {  /* data */
+				addr = (addr_offset << 16) + addr;
+				printf("%04X: ", addr);
 				for(i=0; i<=(n-1); i++) {
+					printf("%02X ", bytes[i]);
 					memory[addr] = bytes[i] & 255;
 					total++;
 					if (addr < minaddr) minaddr = addr;
 					if (addr > maxaddr) maxaddr = addr;
 					addr++;
 				}
+				putchar('\n');
 			}
-			if (status == 1) {  /* end of file */
+			else if (status == 1) {  /* end of file */
 				fclose(fin);
 				printf("   Loaded %d bytes between:", total);
 				printf(" %04X to %04X\n", minaddr, maxaddr);
 				return;
 			}
-			if (status == 2) ;  /* begin of file */
+			else if (status == 2) {}  /* begin of file */
+			else if (status == 4) {  /* extended linear address for up to 32 bit */
+				addr_offset = (bytes[0] << 16) + bytes[1];
+				printf("   Extend Address %04X\n", addr_offset);
+			}
+			else {
+				printf("   Unhandled record type %02X\n", status);
+				printf("%04X: ", addr);
+				for(i=0; i<=(n-1); i++) {
+					printf("%02X ", bytes[i]);
+				}
+				putchar('\n');
+			}
 		} else {
 			printf("   Error: '%s', line: %d\n", filename, lineno);
 		}
@@ -126,7 +145,7 @@ char *filename;
 void save_file(command)
 char *command;
 {
-	int begin, end, addr;
+	uint32_t begin, end, addr;
 	char *ptr, filename[200];
 	FILE *fhex;
 
@@ -135,15 +154,16 @@ char *command;
 	if (*ptr == '\0') {
 		printf("   Must specify address range and filename\n");
 		return;
-		}
+	}
+	printf("ptr '%s'\n", ptr);
 	if (sscanf(ptr, "%x%x%s", &begin, &end, filename) < 3) {
 		printf("   Invalid addresses or filename,\n");
 		printf("    usage: S begin_addr end_addr filename\n");
 		printf("    the addresses must be hexidecimal format\n");
 		return;
 	}
-	begin &= 65535;
-	end &= 65535;
+	// begin &= 0x3FFFF;
+	// end &= 0x3FFFF;
 	if (begin > end) {
 		printf("   Begin address must be less than end address.\n");
 		return;
@@ -153,6 +173,7 @@ char *command;
 		printf("   Can't open '%s' for writing.\n", filename);
 		return;
 	}
+	printf("command '%s' begin %x end %x filename %s\n", command, begin, end, filename);
 	for (addr=begin; addr <= end; addr++)
 		hexout(fhex, memory[addr], addr, 0);
 	hexout(fhex, 0, 0, 1);
@@ -176,6 +197,7 @@ int byte, memory_location, end;
 	static int last_mem, buffer_pos, buffer_addr;
 	static int writing_in_progress=0;
 	register int i, sum;
+	int upper_addr;
 
 	if (!writing_in_progress) {
 		/* initial condition setup */
@@ -183,12 +205,12 @@ int byte, memory_location, end;
 		buffer_pos = 0;
 		buffer_addr = memory_location;
 		writing_in_progress = 1;
-		}
+	}
 
 	if ( (memory_location != (last_mem+1)) || (buffer_pos >= MAXHEXLINE) \
 	 || ((end) && (buffer_pos > 0)) ) {
 		/* it's time to dump the buffer to a line in the file */
-		fprintf(fhex, ":%02X%04X00", buffer_pos, buffer_addr);
+		fprintf(fhex, ":%02X%04X00", buffer_pos, buffer_addr&0xFFFF);
 		sum = buffer_pos + ((buffer_addr>>8)&255) + (buffer_addr&255);
 		for (i=0; i < buffer_pos; i++) {
 			fprintf(fhex, "%02X", byte_buffer[i]&255);
@@ -197,6 +219,12 @@ int byte, memory_location, end;
 		fprintf(fhex, "%02X\n", (-sum)&255);
 		buffer_addr = memory_location;
 		buffer_pos = 0;
+	}
+
+	if ((memory_location & 0xFFFF0000) != (last_mem & 0xFFFF0000)) {
+		printf("   Extended address change from %X to %X\n", last_mem, memory_location);
+		upper_addr = (memory_location >> 16) & 0xFFFF;
+		fprintf(fhex, ":02000004%04X%02X\n", upper_addr, (-(6 + upper_addr))&255);
 	}
 
 	if (end) {
